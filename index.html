@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Target Toss Tracker</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #111; color: #fff; overflow: hidden; height: 100dvh; }
+  #app { position: relative; width: 100%; height: 100%; }
+  video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+  #controls { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.75); padding: 12px; display: flex; flex-wrap: wrap; gap: 8px; z-index: 10; }
+  button { background: #ff6b00; color: white; border: none; padding: 12px 16px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; flex: 1; min-width: 120px; }
+  button:active { transform: scale(0.97); }
+  button.secondary { background: #333; }
+  button.danger { background: #c0392b; }
+  #status { position: absolute; top: 12px; left: 12px; right: 12px; background: rgba(0,0,0,0.6); padding: 8px 12px; border-radius: 8px; font-size: 14px; z-index: 5; text-align: center; }
+  #scoreboard { position: absolute; top: 60px; right: 12px; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 8px; min-width: 140px; z-index: 5; }
+  .player { margin: 4px 0; font-size: 15px; }
+  .player.active { color: #ff6b00; font-weight: bold; }
+  #feedback { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 48px; font-weight: bold; color: #0f0; text-shadow: 0 0 10px #000; pointer-events: none; z-index: 6; opacity: 0; transition: opacity 0.3s; }
+  #feedback.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="app">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+  <div id="status">Tap Start Camera and allow access.</div>
+  <div id="scoreboard">
+    <div class="player active" id="p1">P1: 0</div>
+    <div class="player" id="p2">P2: 0</div>
+  </div>
+  <div id="feedback"></div>
+  <div id="controls">
+    <button id="startBtn">Start Camera</button>
+    <button id="setTargetsBtn" class="secondary" disabled>Set Targets (0/3)</button>
+    <button id="sampleColorBtn" class="secondary" disabled>Sample Color</button>
+    <button id="nextPlayerBtn" class="secondary">Next Player</button>
+    <button id="resetBtn" class="danger">Reset Scores</button>
+  </div>
+</div>
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const feedbackEl = document.getElementById('feedback');
+const p1El = document.getElementById('p1');
+const p2El = document.getElementById('p2');
+let stream = null;
+let settingTargets = false;
+let targets = [];
+let trackingColor = null;
+let isTracking = false;
+let trail = [];
+let lastPositions = [];
+let currentPlayer = 1;
+let scores = {1: 0, 2: 0};
+let landingTimeout = null;
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+window.addEventListener('resize', resize); resize();
+async function startCamera() {
+  try {
+    statusEl.textContent = 'Requesting camera…';
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    video.srcObject = stream; await video.play();
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('setTargetsBtn').disabled = false;
+    document.getElementById('sampleColorBtn').disabled = false;
+    statusEl.textContent = 'Camera ready. Set targets then sample color.';
+    requestAnimationFrame(loop);
+  } catch (e) { statusEl.textContent = 'Camera error: ' + e.message; }
+}
+document.getElementById('startBtn').onclick = startCamera;
+document.getElementById('setTargetsBtn').onclick = () => { settingTargets = true; targets = []; statusEl.textContent = 'Tap 3 target spots on the floor.'; };
+canvas.style.pointerEvents = 'auto';
+canvas.onclick = (e) => {
+  if (!settingTargets) return;
+  const r = canvas.getBoundingClientRect();
+  targets.push({ x: e.clientX - r.left, y: e.clientY - r.top, r: 40, id: targets.length + 1 });
+  if (targets.length >= 3) { settingTargets = false; statusEl.textContent = 'Targets set. Sample color then throw.'; }
+};
+document.getElementById('sampleColorBtn').onclick = () => {
+  const tc = document.createElement('canvas'); tc.width = 40; tc.height = 40;
+  const tctx = tc.getContext('2d');
+  tctx.drawImage(video, canvas.width/2-20, canvas.height/2-20, 40, 40, 0, 0, 40, 40);
+  const d = tctx.getImageData(0,0,40,40).data;
+  let r=0,g=0,b=0,c=0;
+  for(let i=0;i<d.length;i+=4){ r+=d[i]; g+=d[i+1]; b+=d[i+2]; c++; }
+  const hsv = rgbToHsv(r/c, g/c, b/c);
+  trackingColor = {h:hsv.h, s:hsv.s, v:hsv.v, tol:35};
+  isTracking = true;
+  statusEl.textContent = 'Color sampled. Throw!';
+};
+function rgbToHsv(r,g,b){ r/=255;g/=255;b/=255; const max=Math.max(r,g,b),min=Math.min(r,g,b),d=max-min; let h=0,s=max?d/max:0,v=max; if(d){ if(max===r)h=(g-b)/d+(g<b?6:0); else if(max===g)h=(b-r)/d+2; else h=(r-g)/d+4; h/=6; } return {h:h*360,s:s*100,v:v*100}; }
+function inColorRange(r,g,b,t){ const h=rgbToHsv(r,g,b); const dh=Math.min(Math.abs(h.h-t.h),360-Math.abs(h.h-t.h)); return dh<t.tol && Math.abs(h.s-t.s)<45 && Math.abs(h.v-t.v)<45; }
+function loop(){
+  if(!video.videoWidth){ requestAnimationFrame(loop); return; }
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  targets.forEach(t=>{ ctx.beginPath(); ctx.arc(t.x,t.y,t.r,0,6.28); ctx.strokeStyle='#0ff'; ctx.lineWidth=3; ctx.stroke(); ctx.fillStyle='rgba(0,255,255,0.15)'; ctx.fill(); ctx.fillStyle='#0ff'; ctx.font='bold 16px sans-serif'; ctx.fillText(t.id,t.x-5,t.y+5); });
+  if(isTracking && trackingColor){
+    const w=120, h=Math.round(120*video.videoHeight/video.videoWidth);
+    const temp=document.createElement('canvas'); temp.width=w; temp.height=h;
+    const tctx=temp.getContext('2d'); tctx.drawImage(video,0,0,w,h);
+    const img=tctx.getImageData(0,0,w,h).data;
+    let sx=0,sy=0,cnt=0;
+    for(let y=0;y<h;y+=2) for(let x=0;x<w;x+=2){ const i=(y*w+x)*4; if(inColorRange(img[i],img[i+1],img[i+2],trackingColor)){ sx+=x; sy+=y; cnt++; } }
+    if(cnt>6){
+      const cx=(sx/cnt)*(canvas.width/w), cy=(sy/cnt)*(canvas.height/h), mx=canvas.width-cx;
+      trail.push({x:mx,y:cy}); if(trail.length>25) trail.shift();
+      lastPositions.push({x:mx,y:cy}); if(lastPositions.length>4) lastPositions.shift();
+      ctx.beginPath(); ctx.arc(mx,cy,10,0,6.28); ctx.fillStyle='#ff0'; ctx.fill();
+      if(lastPositions.length>=3){ const dx=lastPositions[lastPositions.length-1].x-lastPositions[0].x, dy=lastPositions[lastPositions.length-1].y-lastPositions[0].y; if(Math.sqrt(dx*dx+dy*dy)<12 && !landingTimeout) landingTimeout=setTimeout(()=>scoreLanding(mx,cy),250); }
+    } else if(landingTimeout){ clearTimeout(landingTimeout); landingTimeout=null; }
+    if(trail.length>1){ ctx.beginPath(); ctx.moveTo(trail[0].x,trail[0].y); trail.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.strokeStyle='rgba(255,255,0,0.6)'; ctx.lineWidth=2; ctx.stroke(); }
+  }
+  requestAnimationFrame(loop);
+}
+function scoreLanding(x,y){
+  landingTimeout=null; let best=Infinity, bt=null;
+  targets.forEach(t=>{ const d=Math.hypot(x-t.x,y-t.y); if(d<best){best=d;bt=t;} });
+  let pts=0; if(best<25)pts=10; else if(best<55)pts=7; else if(best<90)pts=3;
+  scores[currentPlayer]+=pts; updateScoreboard();
+  feedbackEl.textContent=pts?('+'+pts+'!'):'Miss'; feedbackEl.classList.add('show'); setTimeout(()=>feedbackEl.classList.remove('show'),700);
+  trail=[]; lastPositions=[]; statusEl.textContent=pts?('Hit +'+pts):'Miss';
+}
+function updateScoreboard(){ p1El.textContent='P1: '+scores[1]; p2El.textContent='P2: '+scores[2]; p1El.classList.toggle('active',currentPlayer===1); p2El.classList.toggle('active',currentPlayer===2); }
+document.getElementById('nextPlayerBtn').onclick=()=>{ currentPlayer=currentPlayer===1?2:1; updateScoreboard(); statusEl.textContent='Player '+currentPlayer+' turn'; trail=[]; };
+document.getElementById('resetBtn').onclick=()=>{ scores={1:0,2:0}; currentPlayer=1; updateScoreboard(); statusEl.textContent='Scores reset'; };
+</script>
+</body>
+</html>
